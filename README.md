@@ -60,19 +60,84 @@ docker run -it --name teachme -v `pwd`/OUTPUT:/wrf/wrfoutput wrf_tutorial /bin/t
 
 ---
 
-## 🧪 Regression Test Case
+## 🧪 Regression Test Case (Updated for Docker)
 
-This case is designed to validate code correctness and performance across model configurations.
+This case is designed to validate code correctness and performance across model configurations using the official WRF regression testing suite inside a Docker container.
+
+### 🚀 Build and Launch the Container
 
 ```bash
 docker build -t wrf_regtest .
 docker run -d -t --name test_001 wrf_regtest /bin/tcsh
-docker exec test_001 ./script.csh BUILD CLEAN 34 1 em_real -d
-docker exec test_001 ./script.csh RUN em_real 34 em_real 03
-docker stop test_001
 ```
 
-Check that both `docker exec` commands return exit status `0`.
+### ⚙️ Required Patches to `regtest.csh`
+
+The original `regtest.csh` was designed for NCAR’s HPC environment and requires the following patches to work inside Docker:
+
+1. **Set required environment variables manually at the top of `regtest.csh`:**
+
+```tcsh
+set WRFREGDATAEM = /wrf
+set WRFREGDATANMM = /wrf
+set DEF_DIR = /wrf
+set acquire_from = /wrf
+set OPENMP = FALSE
+set Num_Procs = 4
+set ARCH = Linux
+set MPIRUNCOMMAND = "mpirun -np 4"
+set COMPOPTS = ( default default default default default )
+set COMPOPTS_NO_NEST = ( default default default default default )
+set BUILD_SCRIPT = ''
+set RUN_SCRIPT = ''
+set DIFF_SCRIPT = ''
+set POST_SCRIPT = ''
+set ZAP_SERIAL_FOR_THIS_CORE = FALSE
+set ZAP_OPENMP_FOR_THIS_CORE = FALSE
+```
+
+2. **Bypass the interactive `./configure` menu:**
+
+Find this block in the script:
+```tcsh
+./configure $DEBUG_FLAG << EOF
+$compopt
+$compopts_nest
+EOF
+```
+
+Replace it with:
+```tcsh
+echo 34 | ./configure $DEBUG_FLAG
+```
+
+This selects option 34 (GNU + dmpar) non-interactively.
+
+3. **You do NOT need `run_regtest.tcsh`.**  
+All environment setup is now embedded directly in `regtest.csh`.
+
+### 🛠️ Copy Updated Script Into Container
+
+```bash
+docker cp regtest.csh test_001:/wrf/WRF/tools/regtest.csh
+docker exec --user root test_001 chmod +x /wrf/WRF/tools/regtest.csh
+docker exec --user root test_001 chown wrfuser:wrf /wrf/WRF/tools/regtest.csh
+```
+
+### ▶️ Run the Regression Test
+
+```bash
+docker exec test_001 tcsh /wrf/WRF/tools/regtest.csh BUILD CLEAN 34 1 em_real -d
+docker exec test_001 tcsh /wrf/WRF/tools/regtest.csh RUN em_real 34 em_real 03
+```
+
+### 🧼 Optional Cleanup
+
+```bash
+docker stop test_001
+docker rm test_001
+```
+
 
 Additional test configurations are described in [README_regtest.md](README_regtest.md).
 
