@@ -143,6 +143,25 @@ Additional test configurations are described in [README_regtest.md](README_regte
 
 ---
 
+### 🐳 Pull Prebuilt Images from Docker Hub
+
+You can skip the local Dockerfile build entirely by pulling prebuilt containers from Docker Hub (maintained by [keven1894](https://hub.docker.com/u/keven1894)):
+
+```bash
+# WRF Tutorial Case
+docker pull keven1894/wrf_tutorial:latest
+docker run -it --rm keven1894/wrf_tutorial /bin/tcsh
+
+# WRF Regression Test
+docker pull keven1894/wrf_regtest:latest
+docker run -d -t --name test_001 keven1894/wrf_regtest /bin/tcsh
+
+# (optional) Run test commands
+docker exec test_001 tcsh /wrf/WRF/tools/regtest.csh BUILD CLEAN 34 1 em_real -d
+```
+
+The `wrf_ncar`, `wrf_regtest`, and `wrf_tutorial` containers are all available for direct use, saving users from having to troubleshoot environment builds locally.
+
 ## 📚 Acknowledgments
 
 This updated version is maintained under the forked repository by **Keven Guan**, Florida International University, 2025. Contributions welcome under [Keven1894/WRF_DOCKER](https://github.com/Keven1894/WRF_DOCKER).
