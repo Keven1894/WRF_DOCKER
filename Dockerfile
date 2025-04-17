@@ -9,19 +9,41 @@ ENV NML_VERSION 4.0.2
 
 # Set up base OS environment
 
-RUN yum -y update
-RUN yum -y install scl file gcc gcc-gfortran gcc-c++ glibc.i686 libgcc.i686 libpng-devel jasper \
+RUN sed -i 's|^mirrorlist=|#mirrorlist=|g' /etc/yum.repos.d/CentOS-Base.repo && \
+    sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' /etc/yum.repos.d/CentOS-Base.repo && \
+    yum -y update
+
+
+RUN yum -y install scl file gcc gcc-gfortran gcc-c glibc.i686 libgcc.i686 libpng-devel jasper \
   jasper-devel hostname m4 make perl tar bash tcsh time wget which zlib zlib-devel \
   openssh-clients openssh-server net-tools fontconfig libgfortran libXext libXrender \
   ImageMagick sudo epel-release git
 
 # Newer version of GNU compiler, required for WRF 2003 and 2008 Fortran constructs
 
-RUN yum -y install centos-release-scl \
- && yum -y install devtoolset-8 \
- && yum -y install devtoolset-8-gcc devtoolset-8-gcc-gfortran devtoolset-8-gcc-c++ \
- && scl enable devtoolset-8 bash \
- && scl enable devtoolset-8 tcsh 
+# Install SCL release and drop the broken sclo-sclo repo
+RUN yum -y install centos-release-scl && \
+    rm -f /etc/yum.repos.d/CentOS-SCLo-sclo.repo && \
+    for f in /etc/yum.repos.d/CentOS-SCLo-*.repo; do \
+      if [ -f "$f" ]; then \
+        sed -i 's|^mirrorlist=|#mirrorlist=|g' "$f"; \
+        sed -i 's|^#baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' "$f"; \
+        sed -i 's|^baseurl=http://mirror.centos.org|baseurl=http://vault.centos.org|g' "$f"; \
+        sed -i 's|^#baseurl=http://mirrorlist.centos.org|baseurl=http://vault.centos.org|g' "$f"; \
+        sed -i 's|^baseurl=http://mirrorlist.centos.org|baseurl=http://vault.centos.org|g' "$f"; \
+      fi; \
+    done
+
+# install devtoolset‑8 and its helpers,
+# skipping the broken centos-sclo-sclo repo entirely
+RUN yum --disablerepo=centos-sclo-sclo -y install \
+      yum-utils \
+      scl-utils \
+      devtoolset-8 \
+      devtoolset-8-gcc \
+      devtoolset-8-gcc-gfortran \
+      devtoolset-8-gcc-c \
+  && yum clean all
 
 RUN groupadd wrf -g 9999
 RUN useradd -u 9999 -g wrf -G wheel -M -d /wrf wrfuser
@@ -32,50 +54,53 @@ RUN mkdir /wrf \
 # Build the libraries with a parallel Make
 ENV J 4
 
-# Build OpenMPI
-RUN mkdir -p /wrf/libs/openmpi/BUILD_DIR
-RUN source /opt/rh/devtoolset-8/enable \
- && cd /wrf/libs/openmpi/BUILD_DIR \
- && curl -L -O https://download.open-mpi.org/release/open-mpi/v4.0/openmpi-4.0.0.tar.gz \
- && tar -xf openmpi-4.0.0.tar.gz \
- && cd openmpi-4.0.0 \
- && ./configure --prefix=/usr/local &> /wrf/libs/build_log_openmpi_config \
- && make all install &> /wrf/libs/build_log_openmpi_make \
- && cd / \
- && rm -rf /wrf/libs/openmpi/BUILD_DIR
+# Build OpenMPI under devtoolset-8
+RUN mkdir -p /wrf/libs/openmpi/BUILD_DIR && \
+    scl enable devtoolset-8 -- bash -c "\
+      cd /wrf/libs/openmpi/BUILD_DIR && \
+      curl -L -O https://download.open-mpi.org/release/open-mpi/v4.0/openmpi-4.0.0.tar.gz && \
+      tar -xf openmpi-4.0.0.tar.gz && \
+      cd openmpi-4.0.0 && \
+      ./configure --prefix=/usr/local &> /wrf/libs/build_log_openmpi_config && \
+      make -j${J} &> /wrf/libs/build_log_openmpi_make && \
+      make install &>> /wrf/libs/build_log_openmpi_make && \
+      cd / && \
+      rm -rf /wrf/libs/openmpi/BUILD_DIR"
 
-# Build HDF5 libraries
-RUN mkdir -p /wrf/libs/hdf5/BUILD_DIR
-RUN source /opt/rh/devtoolset-8/enable \
- && cd /wrf/libs/hdf5/BUILD_DIR \
- && git clone https://bitbucket.hdfgroup.org/scm/hdffv/hdf5.git \
- && cd hdf5 \
- && git checkout hdf5-1_10_4 \
- && ./configure --enable-fortran --enable-cxx --prefix=/usr/local/ &> /wrf/libs/build_log_hdf5_config \
- && make install &> /wrf/libs/build_log_hdf5_make \
- && rm -rf /wrf/libs/hdf5/BUILD_DIR
-ENV LD_LIBRARY_PATH /usr/local/lib
+# Build HDF5 under devtoolset-8 (clone official GitHub tag)
+RUN mkdir -p /wrf/libs/hdf5/BUILD_DIR && \
+    scl enable devtoolset-8 -- bash -c "\
+      cd /wrf/libs/hdf5/BUILD_DIR && \
+      git clone --branch hdf5-1_10_4 --depth 1 https://github.com/HDFGroup/hdf5.git hdf5-1_10_4 && \
+      cd hdf5-1_10_4 && \
+      ./configure --enable-fortran --enable-cxx --prefix=/usr/local &> /wrf/libs/build_log_hdf5_config && \
+      make -j${J} &> /wrf/libs/build_log_hdf5_make && \
+      make install &>> /wrf/libs/build_log_hdf5_make && \
+      rm -rf /wrf/libs/hdf5/BUILD_DIR"
 
-# Build netCDF C and Fortran libraries
-RUN yum -y install libcurl-devel zlib-devel
-ENV NETCDF /wrf/libs/netcdf
+# prerequisites for netCDF builds (skip the broken sclo-sclo repo)
+RUN yum --disablerepo=centos-sclo-sclo -y install libcurl-devel zlib-devel
+
+# set NETCDF path and make sure its BUILD_DIR exists
+ENV NETCDF=/wrf/libs/netcdf
+# Make nc-config visible to configure
+ENV PATH=${NETCDF}/bin:$PATH
 RUN mkdir -p ${NETCDF}/BUILD_DIR
-RUN source /opt/rh/devtoolset-8/enable \
- && cd ${NETCDF}/BUILD_DIR \
- && curl -L -O https://github.com/Unidata/netcdf-c/archive/v4.6.2.tar.gz \
- && curl -L -O https://github.com/Unidata/netcdf-fortran/archive/v4.4.5.tar.gz \
- && tar -xf v4.6.2.tar.gz \
- && cd netcdf-c-4.6.2 \
- && ./configure --prefix=${NETCDF} &> /wrf/libs/build_log_ncc_config \
- && make install &> /wrf/libs/build_log_ncc_make
-RUN source /opt/rh/devtoolset-8/enable \
- && env \
- && cd ${NETCDF}/BUILD_DIR \
- && tar -xf v4.4.5.tar.gz \
- && cd netcdf-fortran-4.4.5/ \
- && export LD_LIBRARY_PATH=${NETCDF}/lib:${LD_LIBRARY_PATH} \
- && CPPFLAGS=-I${NETCDF}/include LDFLAGS=-L${NETCDF}/lib ./configure --prefix=${NETCDF} &> /wrf/libs/build_log_ncf_config \
- && make install &> /wrf/libs/build_log_ncf_make
+
+# download both C and Fortran sources
+RUN curl -L -o ${NETCDF}/BUILD_DIR/netcdf-c-4.6.2.tar.gz \
+      https://github.com/Unidata/netcdf-c/archive/v4.6.2.tar.gz && \
+    curl -L -o ${NETCDF}/BUILD_DIR/netcdf-fortran-4.4.5.tar.gz \
+      https://github.com/Unidata/netcdf-fortran/archive/v4.4.5.tar.gz
+
+
+# Install netCDF‑Fortran from EPEL (matches your netCDF‑C install)
+RUN yum --disablerepo=centos-sclo-sclo -y install \
+      netcdf-fortran-devel.x86_64 \
+      netcdf-fortran.x86_64 && \
+    yum clean all
+
+
 
 RUN mkdir -p /var/run/sshd \
     && ssh-keygen -A \
@@ -87,9 +112,10 @@ RUN mkdir -p  /wrf/WPS_GEOG /wrf/wrfinput /wrf/wrfoutput \
  &&  chown -R wrfuser:wrf /wrf /wrf/WPS_GEOG /wrf/wrfinput /wrf/wrfoutput /usr/local \
  &&  chmod 6755 /wrf /wrf/WPS_GEOG /wrf/wrfinput /wrf/wrfoutput /usr/local
 
-# Download NCL
-RUN curl -SL https://ral.ucar.edu/sites/default/files/public/projects/ncar-docker-wrf/nclncarg-6.3.0.linuxcentos7.0x8664nodapgcc482.tar.gz | tar zxC /usr/local
-ENV NCARG_ROOT /usr/local
+# Install NCL from EPEL
+RUN yum --disablerepo=centos-sclo-sclo -y install ncl && \
+    yum clean all
+ENV NCARG_ROOT=/usr
 
 # Set environment for interactive container shells
 RUN echo export LDFLAGS="-lm" >> /etc/bashrc \
@@ -118,24 +144,63 @@ WORKDIR /wrf
 # Download data
 ARG argname=tutorial
 RUN echo DAVE $argname
-RUN if [ "$argname" = "tutorial" ] ; then curl -SL http://www2.mmm.ucar.edu/wrf/src/wps_files/geog_low_res_mandatory.tar.gz | tar -xzC /wrf/WPS_GEOG ; fi
-RUN if [ "$argname" = "tutorial" ] ; then curl -SL http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/colorado_march16.new.tar.gz | tar -xzC /wrf/wrfinput ; fi
-RUN if [ "$argname" = "tutorial" ] ; then curl -SL http://www2.mmm.ucar.edu/wrf/src/namelists_v$NML_VERSION.tar.gz  | tar -xzC /wrf/wrfinput ; fi
-RUN if [ "$argname" = "tutorial" ] ; then curl -SL http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/WRF_NCL_scripts.tar.gz | tar -xzC /wrf ; fi
-RUN if [ "$argname" = "regtest" ]  ; then curl -SL http://www2.mmm.ucar.edu/wrf/dave/DATA/Data_small/data_SMALL.tar.gz | tar -xzC /wrf ; fi
-RUN if [ "$argname" = "regtest" ]  ; then curl -SL http://www2.mmm.ucar.edu/wrf/dave/nml.tar.gz | tar -xzC /wrf ; fi
-RUN if [ "$argname" = "regtest" ]  ; then curl -SL http://www2.mmm.ucar.edu/wrf/dave/script.tar | tar -xC /wrf ; fi
+
+# geography (gzip)
+RUN if [ "$argname" = "tutorial" ] ; then \
+      curl -SL --fail http://www2.mmm.ucar.edu/wrf/src/wps_files/geog_low_res_mandatory.tar.gz \
+        | tar -xzC /wrf/WPS_GEOG ; \
+    fi
+
+# Colorado input (may no longer exist at the old URL)
+RUN if [ "$argname" = "tutorial" ] ; then \
+      if curl -SL --head --fail http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/colorado_march16.new.tar.gz ; then \
+        curl -SL http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/colorado_march16.new.tar.gz \
+          | tar -xC /wrf/wrfinput ; \
+      else \
+        echo "WARNING: tutorial Colorado data not found; skipping download. Please add /wrf/wrfinput/colorado_march16.new.tar.gz manually if needed." ; \
+      fi ; \
+    fi
+
+# namelists (gzip)
+RUN if [ "$argname" = "tutorial" ] ; then \
+      curl -SL --fail http://www2.mmm.ucar.edu/wrf/src/namelists_v${NML_VERSION}.tar.gz \
+        | tar -xzC /wrf/wrfinput ; \
+    fi
+
+# NCL scripts (gzip)
+RUN if [ "$argname" = "tutorial" ] ; then \
+      if curl -SL --head --fail http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/WRF_NCL_scripts.tar.gz; then \
+        curl -SL http://www2.mmm.ucar.edu/wrf/TUTORIAL_DATA/WRF_NCL_scripts.tar.gz \
+          | tar -xzC /wrf ; \
+      else \
+        echo "WARNING: WRF_NCL_scripts.tar.gz not found; skipping."; \
+      fi ; \
+    fi
+
+# regression test data (plain tar)
+RUN if [ "$argname" = "regtest" ] ; then \
+      curl -SL --fail http://www2.mmm.ucar.edu/wrf/dave/DATA/Data_small/data_SMALL.tar.gz \
+        | tar -xC /wrf ; \
+    fi
+RUN if [ "$argname" = "regtest" ] ; then \
+      curl -SL --fail http://www2.mmm.ucar.edu/wrf/dave/nml.tar.gz \
+        | tar -xC /wrf ; \
+    fi
+RUN if [ "$argname" = "regtest" ] ; then \
+      curl -SL --fail http://www2.mmm.ucar.edu/wrf/dave/script.tar \
+        | tar -xC /wrf ; \
+    fi
+
 
 # Download wps source
 RUN if [ "$argname" = "tutorial" ] ; then git clone https://github.com/wrf-model/WPS.git WPS ; fi
 
 RUN echo _HERE1_
-RUN git clone https://github.com/davegill/WRF.git davegill/WRF \
-  && cd davegill/WRF \
-  && git fetch origin +refs/pull/4/merge: \
-  && git checkout -qf FETCH_HEAD \
-  && cd .. \
-  && mv WRF /wrf/WRF
+# Pull WRF into /wrf/WRF and apply PR merge
+RUN git clone https://github.com/davegill/WRF.git /wrf/WRF && \
+    cd /wrf/WRF && \
+    git fetch origin +refs/pull/4/merge:FETCH_HEAD && \
+    git checkout -qf FETCH_HEAD
 RUN echo _HERE2_
 
 ENV JASPERINC /usr/include/jasper
